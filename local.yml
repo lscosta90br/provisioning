@@ -1,0 +1,82 @@
+---
+- name: Configurar usuário RSO com acesso sudo sem senha (Multiplataforma)
+  hosts: all
+  become: yes
+
+  vars:
+    ssh_service_name: >-
+      {% if ansible_os_family == 'RedHat' %}sshd
+      {% elif ansible_os_family == 'Debian' %}ssh
+      {% else %}sshd{% endif %}
+    admin_group: "{{ 'wheel' if ansible_os_family in ['RedHat', 'Archlinux'] else 'sudo' }}"
+    ssh_package_name: "{{ ansible_os_family == 'RedHat' | ternary('openssh-server', 'openssh-server') }}"
+
+  tasks:
+    - name: 01.1 | Criar usuário rso
+      user:
+        name: rso
+        state: present
+        shell: /bin/bash
+        groups:  "{{ admin_group }}"
+        append: yes
+
+    - name: 01.2 | Configurar acesso sudo sem senha para rso
+      copy:
+        dest: /etc/sudoers.d/rso
+        content: "rso ALL=(ALL) NOPASSWD:ALL"
+        mode: 0440
+        validate: 'visudo -cf %s'
+
+    - name: Instalar e configurar servidor SSH (Multiplataforma)
+      block:
+        - name: 01.3.1 | Instalar servidor SSH (Debian/Ubuntu)
+          apt:
+            name: "{{ ssh_package_name }}"
+            state: present
+          when: ansible_os_family == 'Debian'
+          register: ssh_install_debian
+          
+        - name: 01.3.2 | Instalar servidor SSH (RHEL/CentOS)
+          yum:
+            name: "{{ ssh_package_name }}"
+            state: present
+          when: ansible_os_family == 'RedHat'
+          register: ssh_install_redhat
+          
+        - name: 01.3.3 | Instalar servidor SSH (ArchLinux / Endevouros )
+          pacman:
+            name: openssh
+            state: present
+          when: ansible_os_family == 'Archlinux'
+          register: ssh_install_arch
+
+      rescue:
+        - name: 01.3.4 | Notificar falha na instalação do SSH
+          debug:
+            msg: "Falha ao instalar o servidor SSH no {{ ansible_os_family }}. Verifique os logs."
+          failed_when: false  # Continua a execução mesmo após o erro
+          
+      always:
+        - name: 01.3.5 | Verificar status da instalação do SSH
+          debug:
+            msg: |
+              Resultados da instalação SSH:
+              - Debian: {{ ssh_install_debian is defined and ssh_install_debian.changed | default('n/a') }}
+              - RedHat: {{ ssh_install_redhat is defined and ssh_install_redhat.changed | default('n/a') }}
+              - Arch: {{ ssh_install_arch is defined and ssh_install_arch.changed | default('n/a') }}
+          when: 
+            - ssh_install_debian is defined or 
+              ssh_install_redhat is defined or 
+              ssh_install_arch is defined
+
+    - name: 01.4 | Habilitar e iniciar o serviço SSH
+      service:
+        name: "{{ ssh_service_name }}"
+        enabled: yes
+        state: started
+
+    - name: 01.5 | Configurar authorized_keys para o usuário rso
+      ansible.posix.authorized_key:
+        user: rso
+        state: present
+        key: "{{ lookup('file', 'roles/provisioning/files/rdo_id_ed25519.pub') }}"
